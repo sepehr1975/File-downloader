@@ -51,7 +51,8 @@ jobs:
       - name: Install aria2 and zip
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 zip curl bc
+          # FIX: Added p7zip-full for reliable cross-platform archives (replaces zip for split/password use)
+          sudo apt-get install -y aria2 zip p7zip-full curl bc
 
       - name: AVASAM Downloader - https://avasam.ir
         run: |
@@ -261,35 +262,49 @@ jobs:
               ARCHIVE_NAME="archive_$(date +%Y%m%d_%H%M%S)"
               FOLDER_NAME=$(get_unique_folder "$BACKUP_DIR" "$ARCHIVE_NAME")
               mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
-              echo "Creating zip archive in folder: $BACKUP_DIR/$FOLDER_NAME"
+              echo "Creating archive in folder: $BACKUP_DIR/$FOLDER_NAME"
 
-              # Validate files before zipping
-              VALID_FILES=""
+              # Validate files before archiving
+              VALID_FILES=()
               for f in tmp_downloads/*; do
                 if [ -f "$f" ] && [ -s "$f" ]; then
-                  VALID_FILES="$VALID_FILES $f"
+                  VALID_FILES+=("$f")
                 else
                   echo "Skipping empty or invalid file: $f"
                 fi
               done
 
-              if [ -n "$VALID_FILES" ]; then
+              if [ ${#VALID_FILES[@]} -gt 0 ]; then
+                # ============================================================
+                # FIX: Use 7z instead of zip for password-protected archives.
+                # zip -P produces archives that tools like Windows Explorer
+                # misidentify as password-protected even without a password.
+                # 7z handles password encryption cleanly and cross-platform.
+                # ============================================================
                 if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -j -P "$ZIP_PASSWORD" "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip" $VALID_FILES
+                  7z a \
+                    -p"${ZIP_PASSWORD}" \
+                    -mhe=on \
+                    -mx=0 \
+                    "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.7z" \
+                    "${VALID_FILES[@]}"
                 else
-                  zip -j "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip" $VALID_FILES
+                  7z a \
+                    -mx=0 \
+                    "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.7z" \
+                    "${VALID_FILES[@]}"
                 fi
 
-                # Verify zip was created and has content
-                if [ ! -s "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip" ]; then
-                  echo "ERROR: Zip file is empty or not created!"
-                  rm -f "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip"
+                # Verify archive was created and has content
+                if [ ! -s "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.7z" ]; then
+                  echo "ERROR: Archive file is empty or not created!"
+                  rm -f "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.7z"
                 else
                   # Create README.md for zip mode
-                  ZIP_SIZE=$(stat -c%s "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip")
-                  ZIP_SIZE_MB=$(echo "scale=2; $ZIP_SIZE / 1024 / 1024" | bc)
+                  ARCHIVE_SIZE=$(stat -c%s "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.7z")
+                  ARCHIVE_SIZE_MB=$(echo "scale=2; $ARCHIVE_SIZE / 1024 / 1024" | bc)
                   FOLDER_ENCODED=$(urlencode "${FOLDER_NAME}")
-                  FILE_ENCODED=$(urlencode "${ARCHIVE_NAME}.zip")
+                  FILE_ENCODED=$(urlencode "${ARCHIVE_NAME}.7z")
                   RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/downloads/${FOLDER_ENCODED}/${FILE_ENCODED}"
 
                   {
@@ -301,8 +316,8 @@ jobs:
                     echo ""
                     echo "| Property | Value |"
                     echo "|----------|-------|"
-                    echo "| **Archive Name** | \`${ARCHIVE_NAME}.zip\` |"
-                    echo "| **Size** | ${ZIP_SIZE_MB} MB |"
+                    echo "| **Archive Name** | \`${ARCHIVE_NAME}.7z\` |"
+                    echo "| **Size** | ${ARCHIVE_SIZE_MB} MB |"
                     echo "| **Status** | **Complete (100%)** |"
                     if [ -n "$ZIP_PASSWORD" ]; then
                       echo "| **Password Protected** | **YES** |"
@@ -316,7 +331,17 @@ jobs:
                     echo ""
                     echo "| File | Link |"
                     echo "|------|------|"
-                    echo "| \`${ARCHIVE_NAME}.zip\` | [Download](${RAW_LINK}) |"
+                    echo "| \`${ARCHIVE_NAME}.7z\` | [Download](${RAW_LINK}) |"
+                    echo ""
+                    echo "---"
+                    echo ""
+                    echo "## How to Extract"
+                    echo ""
+                    echo "1. **Install** [7-Zip](https://www.7-zip.org/) (Windows/Linux) or [Keka](https://www.keka.io/) (Mac)"
+                    echo "2. **Right-click** the \`.7z\` file → Extract Here"
+                    if [ -n "$ZIP_PASSWORD" ]; then
+                      echo "3. Enter the password when prompted"
+                    fi
                     echo ""
                     echo "---"
                     echo ""
@@ -360,35 +385,38 @@ jobs:
               if [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
                 echo "$BASENAME is $(( SIZE / 1024 / 1024 ))MB - splitting into ${SPLIT_THRESHOLD_MB}MB parts"
 
-                # Copy file with temp name for processing
-                TEMP_NAME="file_$$"
-                cp "$FILE" "tmp_downloads/${TEMP_NAME}.${EXT}"
+                # ============================================================
+                # FIX: Use 7z instead of zip -s for split archives.
+                # The Linux `zip -s` command produces split archives that many
+                # extraction tools (Windows Explorer, older WinRAR) incorrectly
+                # treat as password-protected. 7z handles splits cleanly and
+                # is fully cross-platform compatible.
+                # ============================================================
 
-                cd tmp_downloads
+                ARCHIVE_BASE="$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}"
+
                 if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -0 -s "${SPLIT_THRESHOLD_MB}m" -P "$ZIP_PASSWORD" "${TEMP_NAME}.zip" "${TEMP_NAME}.${EXT}"
+                  7z a \
+                    -v${SPLIT_THRESHOLD_MB}m \
+                    -p"${ZIP_PASSWORD}" \
+                    -mhe=on \
+                    -mx=0 \
+                    "${ARCHIVE_BASE}.7z" \
+                    "$FILE"
                 else
-                  zip -0 -s "${SPLIT_THRESHOLD_MB}m" "${TEMP_NAME}.zip" "${TEMP_NAME}.${EXT}"
+                  7z a \
+                    -v${SPLIT_THRESHOLD_MB}m \
+                    -mx=0 \
+                    "${ARCHIVE_BASE}.7z" \
+                    "$FILE"
                 fi
 
-                # Move all parts to backup directory with correct names
-                for part in ${TEMP_NAME}.z[0-9]* ${TEMP_NAME}.zip; do
-                  if [ -f "$part" ] && [ -s "$part" ]; then
-                    PART_EXT="${part##*.}"
-                    mv "$part" "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.${PART_EXT}"
-                    echo "  Created: ${FOLDER_NAME}.${PART_EXT}"
-                  fi
-                done
-
-                rm -f "${TEMP_NAME}.${EXT}"
-                cd ..
-
-                PARTS_COUNT=$(ls "$BACKUP_DIR/${FOLDER_NAME}/"*.z* 2>/dev/null | wc -l)
+                PARTS_COUNT=$(ls "$BACKUP_DIR/${FOLDER_NAME}/"*.7z* 2>/dev/null | wc -l)
                 echo "Parts created in folder $BACKUP_DIR/$FOLDER_NAME: $PARTS_COUNT files"
 
                 # Verify at least one part was created
                 if [ "$PARTS_COUNT" -eq 0 ]; then
-                  echo "ERROR: No zip parts were created for $BASENAME"
+                  echo "ERROR: No archive parts were created for $BASENAME"
                   continue
                 fi
 
@@ -405,7 +433,7 @@ jobs:
                 # Build download links for all parts
                 DOWNLOAD_LINKS_MD=""
                 LINK_NUM=0
-                for part_file in "$BACKUP_DIR/${FOLDER_NAME}/"*.z*; do
+                for part_file in $(ls "$BACKUP_DIR/${FOLDER_NAME}/"*.7z* 2>/dev/null | sort); do
                   if [ -f "$part_file" ]; then
                     PART_BASENAME=$(basename "$part_file")
                     PART_ENCODED=$(urlencode "${PART_BASENAME}")
@@ -426,7 +454,7 @@ jobs:
                   printf '%s\n' "| Property | Value |"
                   printf '%s\n' "|----------|-------|"
                   printf '%s\n' "| **Original File** | \`${BASENAME}\` |"
-                  printf '%s\n' "| **Total Size** | **${PARTS_COUNT} zip parts** - **${TOTAL_SIZE_MB} MB** |"
+                  printf '%s\n' "| **Total Size** | **${PARTS_COUNT} parts** - **${TOTAL_SIZE_MB} MB** |"
                   printf '%s\n' "| **Status** | **Complete (100%)** |"
                   if [ -n "$ZIP_PASSWORD" ]; then
                     printf '%s\n' "| **Password Protected** | **YES** |"
@@ -446,9 +474,13 @@ jobs:
                   printf '%s\n' ""
                   printf '%s\n' "## How to Extract"
                   printf '%s\n' ""
-                  printf '%s\n' "1. **Download** all \`.zip\` and \`.z01\`, \`.z02\`... files"
-                  printf '%s\n' "2. **Extract** using [7-Zip](https://www.7-zip.org/) or [WinRAR](https://www.rarlab.com/)"
-                  printf '%s\n' "3. Open the \`.zip\` file - all parts will combine automatically"
+                  printf '%s\n' "1. **Download** all parts (e.g. \`.7z.001\`, \`.7z.002\`...)"
+                  printf '%s\n' "2. **Install** [7-Zip](https://www.7-zip.org/) (Windows/Linux) or [Keka](https://www.keka.io/) (Mac)"
+                  printf '%s\n' "3. **Right-click** the \`.7z.001\` file → Extract Here"
+                  printf '%s\n' "4. All parts combine automatically into the original file"
+                  if [ -n "$ZIP_PASSWORD" ]; then
+                    printf '%s\n' "5. Enter the password when prompted"
+                  fi
                   printf '%s\n' ""
                   printf '%s\n' "---"
                   printf '%s\n' ""
@@ -458,23 +490,37 @@ jobs:
                 echo "Created README.md for split archive"
 
               else
-                echo "$BASENAME - creating zip in folder: $BACKUP_DIR/$FOLDER_NAME"
+                echo "$BASENAME - creating 7z archive in folder: $BACKUP_DIR/$FOLDER_NAME"
+
+                # ============================================================
+                # FIX: Use 7z instead of zip for single-file archives.
+                # zip -j -P and even zip -j (no password) can produce archives
+                # that some tools flag as encrypted. 7z is clean and reliable.
+                # ============================================================
 
                 if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -j -P "$ZIP_PASSWORD" "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.zip" "$FILE"
+                  7z a \
+                    -p"${ZIP_PASSWORD}" \
+                    -mhe=on \
+                    -mx=0 \
+                    "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.7z" \
+                    "$FILE"
                 else
-                  zip -j "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.zip" "$FILE"
+                  7z a \
+                    -mx=0 \
+                    "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.7z" \
+                    "$FILE"
                 fi
 
-                # Verify zip was created successfully
-                if [ ! -s "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.zip" ]; then
-                  echo "ERROR: Failed to create zip for $BASENAME"
-                  rm -f "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.zip"
+                # Verify archive was created successfully
+                if [ ! -s "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.7z" ]; then
+                  echo "ERROR: Failed to create archive for $BASENAME"
+                  rm -f "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.7z"
                   continue
                 fi
 
                 SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
-                FILE_ENCODED=$(urlencode "${FOLDER_NAME}.zip")
+                FILE_ENCODED=$(urlencode "${FOLDER_NAME}.7z")
                 RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/downloads/${FOLDER_ENCODED}/${FILE_ENCODED}"
 
                 README_FILE="$BACKUP_DIR/${FOLDER_NAME}/README.md"
@@ -502,14 +548,24 @@ jobs:
                   printf '%s\n' ""
                   printf '%s\n' "| File | Link |"
                   printf '%s\n' "|------|------|"
-                  printf '%s\n' "| \`${FOLDER_NAME}.zip\` | [Download](${RAW_LINK}) |"
+                  printf '%s\n' "| \`${FOLDER_NAME}.7z\` | [Download](${RAW_LINK}) |"
+                  printf '%s\n' ""
+                  printf '%s\n' "---"
+                  printf '%s\n' ""
+                  printf '%s\n' "## How to Extract"
+                  printf '%s\n' ""
+                  printf '%s\n' "1. **Install** [7-Zip](https://www.7-zip.org/) (Windows/Linux) or [Keka](https://www.keka.io/) (Mac)"
+                  printf '%s\n' "2. **Right-click** the \`.7z\` file → Extract Here"
+                  if [ -n "$ZIP_PASSWORD" ]; then
+                    printf '%s\n' "3. Enter the password when prompted"
+                  fi
                   printf '%s\n' ""
                   printf '%s\n' "---"
                   printf '%s\n' ""
                   printf '%s\n' "*This tool created by [avasam.ir](https://avasam.ir)*"
                 } > "$README_FILE"
 
-                echo "Created zip and README.md"
+                echo "Created 7z archive and README.md"
               fi
             done
             rm -rf tmp_downloads
@@ -803,10 +859,10 @@ jobs:
             ALL_FILES+=("$FILE")
           done < <(find downloads -name "README.md" -print0 2>/dev/null)
 
-          # Then add zip parts sorted by name (for ordered upload)
+          # FIX: Updated glob to match .7z split parts (.7z.001, .7z.002...) and single .7z files
           while IFS= read -r -d '' FILE; do
             ALL_FILES+=("$FILE")
-          done < <(find downloads -type f \( -name "*.z[0-9]*" -o -name "*.zip" -o -name "*.mp4" -o -name "*.mp3" -o -name "*.m4a" -o -name "*.exe" -o -name "*.iso" -o -name "*.tar*" -o -name "*.rar" -o -name "*.7z" \) -print0 2>/dev/null | sort -z)
+          done < <(find downloads -type f \( -name "*.7z" -o -name "*.7z.[0-9]*" -o -name "*.mp4" -o -name "*.mp3" -o -name "*.m4a" -o -name "*.exe" -o -name "*.iso" -o -name "*.tar*" -o -name "*.rar" \) -print0 2>/dev/null | sort -z)
 
           TOTAL_FILES=${#ALL_FILES[@]}
           echo "Found $TOTAL_FILES files to push"
